@@ -5,7 +5,8 @@ user's own game dump. The mode in config.json picks the platform:
   for the console). A Wii image is detected by its game id in the manifest.
 - ``wiiu_files``: a Wii U game folder -> ``<name>_UA`` with a Cemu graphic pack and an SDCafiine folder.
 - ``nup``: a Switch 2 ``.nup`` package -> ``<name> (UA).nup`` (updated in place when it can) plus a ``<name> (UA) PC``
-  romfs overlay folder that NX2navi and Hookshot read.
+  romfs overlay folder that NX2navi and Hookshot read. When Longshot is installed, the patcher can instead write the
+  translated files straight into the game Longshot unpacked (``<build>/romfs``), with no .nup.
 
 The original dump is only read. The translation is always downloaded from the repository; nothing is bundled.
 """
@@ -22,7 +23,7 @@ import tempfile
 import urllib.request
 import zipfile
 
-PATCHER_VERSION = "1.2.1"
+PATCHER_VERSION = "1.3.0"
 
 
 def base_dir():
@@ -567,6 +568,118 @@ def offer_nx2navi(pc_dir):
     print(f"NX2navi: lang = ru, mods_dir = {mods}. Старий файл: {ini}.bak")
 
 
+# -- Longshot: the game unpacked by its launcher; the translation goes straight into that folder, no .nup needed ---
+LONGSHOT_BACKUP = "romfs_original_ua_backup"   # beside romfs: the original files the translation replaced
+
+
+def longshot_data_dirs(store):
+    """Launcher data folders (with builds.json): the remembered ones, then the usual install places."""
+    found = list(store.get("_longshot") or [])
+    for env in ("LOCALAPPDATA", "APPDATA"):
+        root = os.environ.get(env)
+        if root:
+            found += [os.path.dirname(p) for p in glob.glob(os.path.join(root, "*", "builds.json"))
+                      + glob.glob(os.path.join(root, "*", "LongshotLauncher-data", "builds.json"))]
+    return list({os.path.normcase(os.path.abspath(p)): os.path.abspath(p) for p in found}.values())
+
+
+def longshot_builds(data_dir):
+    """The game folders (``<build>/romfs`` unpacked by Longshot) listed in ``<data_dir>/builds.json``."""
+    try:
+        with open(os.path.join(data_dir, "builds.json"), encoding="utf-8") as stream:
+            builds = json.load(stream).get("builds") or []
+    except (OSError, ValueError, AttributeError):
+        return []
+    return [b["folder"] for b in builds if isinstance(b, dict) and b.get("folder")
+            and os.path.isdir(os.path.join(b["folder"], "romfs"))
+            and os.path.isfile(os.path.join(b["folder"], ".longshot_romfs"))]
+
+
+def find_longshot(store):
+    """``{data folder: [game folders]}``; asks for the folder when none is found (Enter skips)."""
+    found = {d: longshot_builds(d) for d in longshot_data_dirs(store)}
+    found = {d: b for d, b in found.items() if b}
+    if found:
+        return found
+    if not ask_yes("Ви граєте в Longshot (гра для Windows)?"):
+        return {}
+    folder = input("Вкажіть теку Longshot Launcher (там, де LongshotLauncher.exe): ").strip().strip('"')
+    for data_dir in (os.path.join(folder, "LongshotLauncher-data"), folder):
+        builds = longshot_builds(data_dir)
+        if builds:
+            store.set("_longshot", list(dict.fromkeys((store.get("_longshot") or []) + [data_dir])))
+            return {data_dir: builds}
+    print("У цій теці немає зібраної гри Longshot. Спершу зберіть гру в Longshot Launcher, тоді запустіть патчер.")
+    return {}
+
+
+def set_language_ru(game):
+    """``language.txt``: the code line becomes ``ru`` (Ukrainian sits in the Russian slot); comments stay."""
+    path = os.path.join(game, "language.txt")
+    if not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8", errors="replace") as stream:
+        lines = stream.read().splitlines()
+    codes = [n for n, line in enumerate(lines) if line.strip() and not line.lstrip().startswith("#")]
+    if codes and lines[codes[0]].strip() == "ru":
+        return
+    if codes:
+        lines[codes[0]] = "ru"
+    else:
+        lines.append("ru")
+    write_atomic(path, "\n".join(lines) + "\n")
+
+
+def install_longshot(files, games, manifest):
+    """Copy the translated files into each game's romfs; the first time, keep the originals in a backup folder."""
+    originals = manifest.get("originals", {})
+    for game in games:
+        romfs, backup = os.path.join(game, "romfs"), os.path.join(game, LONGSHOT_BACKUP)
+        checked = False
+        for rel, path in files.items():
+            if not rel.startswith("romfs/"):
+                continue
+            inner = rel[len("romfs/"):].split("/")
+            target, saved = os.path.join(romfs, *inner), os.path.join(backup, *inner)
+            if os.path.isfile(target) and not os.path.exists(saved):
+                if not checked and rel in originals and sha256_file(target) != originals[rel]:
+                    mismatch(f"файл {rel} у грі Longshot не збігається з оригіналом.")
+                    checked = True
+                os.makedirs(os.path.dirname(saved), exist_ok=True)
+                shutil.copyfile(target, saved)
+            copy_if_changed(path, target)
+        set_language_ru(game)
+        print(f"Longshot: переклад записано в {romfs}")
+        print(f"  мова гри: ru (українська стоїть на місці російської); оригінали файлів: {backup}")
+
+
+def offer_longshot(files, manifest, store):
+    """Install into Longshot when the user agrees; returns the game folders written (empty when skipped)."""
+    found = find_longshot(store)
+    games = [g for builds in found.values() for g in builds]
+    if not games:
+        return []
+    print("Знайдено гру Longshot:")
+    for game in games:
+        print(f"  {os.path.join(game, 'romfs')}")
+    if not ask_yes("Записати переклад прямо в Longshot (пакет .nup для цього не потрібен)?"):
+        return []
+    install_longshot(files, games, manifest)
+    for data_dir in found:   # the launcher writes its own language into language.txt when it starts the game
+        path = os.path.join(data_dir, "settings.json")
+        try:
+            with open(path, encoding="utf-8") as stream:
+                settings = json.load(stream)
+        except (OSError, ValueError):
+            continue
+        if isinstance(settings, dict) and "language" in settings and settings["language"] != "ru":
+            shutil.copyfile(path, path + ".bak")
+            settings["language"] = "ru"
+            write_atomic(path, json.dumps(settings, indent=2, ensure_ascii=False))
+            print(f"Longshot Launcher: мова гри ru. Старий файл: {path}.bak")
+    return games
+
+
 # -- the patcher itself: newer version from the repository ----------------------------------------------------------
 
 def raw_url(config):
@@ -754,9 +867,13 @@ def main(argv):
               + (f" ({head[:7]})" if head else " (версію репозиторію визначити не вдалося)"))
         print_news(config, store.get("_last_commit"), head)
         ctx = {"commit": head, "store": store, "clean": clean}
-        output = MODES[config["mode"]](manifest, repo, work, ctx)
-        if config["mode"] == "nup":
-            offer_nx2navi(output.replace(" (UA).nup", " (UA) PC"))
+        longshot = offer_longshot(changed_files(repo), manifest, store) if config["mode"] == "nup" else []
+        if longshot and not ask_yes("Зібрати також пакет .nup (для консолі, NX2navi або Hookshot)?"):
+            output = ", ".join(os.path.join(game, "romfs") for game in longshot)
+        else:
+            output = MODES[config["mode"]](manifest, repo, work, ctx)
+            if config["mode"] == "nup":
+                offer_nx2navi(output.replace(" (UA).nup", " (UA) PC"))
         if head and store.get("_last_commit") != head:
             store.set("_last_commit", head)
     finally:
