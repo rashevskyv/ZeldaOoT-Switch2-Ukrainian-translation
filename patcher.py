@@ -23,7 +23,7 @@ import tempfile
 import urllib.request
 import zipfile
 
-PATCHER_VERSION = "1.3.2"
+PATCHER_VERSION = "1.3.3"
 
 
 def base_dir():
@@ -666,7 +666,7 @@ def install_longshot(files, games, manifest):
     originals = manifest.get("originals", {})
     for game in games:
         romfs, backup = os.path.join(game, "romfs"), os.path.join(game, LONGSHOT_BACKUP)
-        checked = False
+        checked, changed = False, False
         for rel, path in files.items():
             if not rel.startswith("romfs/"):
                 continue
@@ -680,8 +680,13 @@ def install_longshot(files, games, manifest):
                 if original:   # an earlier translation is never saved as the "original"
                     os.makedirs(os.path.dirname(saved), exist_ok=True)
                     shutil.copyfile(target, saved)
-            copy_if_changed(path, target)
+            changed = copy_if_changed(path, target) or changed
         set_language_ru(game)
+        if changed:   # Longshot keeps the UI layout, textures and fonts it resolved from romfs here; it must resolve them again
+            stale = os.path.join(game, "cache", "prompts")
+            if os.path.isdir(stale):
+                shutil.rmtree(stale, ignore_errors=True)
+                print(f"  кеш інтерфейсу Longshot очищено ({stale}); він відновиться при першому запуску гри")
         print(f"Longshot: переклад записано в {romfs}")
         print(f"  мова гри: ru (українська стоїть на місці російської); оригінали файлів: {backup}")
 
