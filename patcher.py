@@ -23,7 +23,7 @@ import tempfile
 import urllib.request
 import zipfile
 
-PATCHER_VERSION = "1.3.1"
+PATCHER_VERSION = "1.3.2"
 
 
 def base_dir():
@@ -673,11 +673,13 @@ def install_longshot(files, games, manifest):
             inner = rel[len("romfs/"):].split("/")
             target, saved = os.path.join(romfs, *inner), os.path.join(backup, *inner)
             if os.path.isfile(target) and not os.path.exists(saved):
-                if not checked and rel in originals and sha256_file(target) != originals[rel]:
-                    mismatch(f"файл {rel} у грі Longshot не збігається з оригіналом.")
+                original = rel not in originals or sha256_file(target) == originals[rel]
+                if not original and not checked:
+                    mismatch(f"файл {rel} у грі Longshot не збігається з оригіналом (можливо, там уже інший переклад).")
                     checked = True
-                os.makedirs(os.path.dirname(saved), exist_ok=True)
-                shutil.copyfile(target, saved)
+                if original:   # an earlier translation is never saved as the "original"
+                    os.makedirs(os.path.dirname(saved), exist_ok=True)
+                    shutil.copyfile(target, saved)
             copy_if_changed(path, target)
         set_language_ru(game)
         print(f"Longshot: переклад записано в {romfs}")
