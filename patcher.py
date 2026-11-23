@@ -23,7 +23,7 @@ import tempfile
 import urllib.request
 import zipfile
 
-PATCHER_VERSION = "1.3.0"
+PATCHER_VERSION = "1.3.1"
 
 
 def base_dir():
@@ -54,11 +54,12 @@ def sha256_file(path, algo="sha256"):
     return digest.hexdigest()
 
 
-def ask_yes(question):
+def ask_yes(question, default=False):
     try:
-        return input(f"{question} (y/N): ").strip().lower() in ("y", "yes", "т", "так")
+        answer = input(f"{question} ({'Y/n' if default else 'y/N'}): ").strip().lower()
     except EOFError:
         return False
+    return default if not answer else answer in ("y", "yes", "т", "так")
 
 
 def write_atomic(path, data):
@@ -584,33 +585,63 @@ def longshot_data_dirs(store):
 
 
 def longshot_builds(data_dir):
-    """The game folders (``<build>/romfs`` unpacked by Longshot) listed in ``<data_dir>/builds.json``."""
+    """The game folders (``<build>/romfs`` unpacked by Longshot) listed in ``<data_dir>/builds.json``.
+    A game folder itself (it has ``romfs`` and the ``.longshot_romfs`` mark) counts as its own single build."""
+    def is_game(folder):
+        return os.path.isdir(os.path.join(folder, "romfs")) and os.path.isfile(os.path.join(folder, ".longshot_romfs"))
+    if is_game(data_dir):
+        return [data_dir]
     try:
         with open(os.path.join(data_dir, "builds.json"), encoding="utf-8") as stream:
             builds = json.load(stream).get("builds") or []
     except (OSError, ValueError, AttributeError):
         return []
-    return [b["folder"] for b in builds if isinstance(b, dict) and b.get("folder")
-            and os.path.isdir(os.path.join(b["folder"], "romfs"))
-            and os.path.isfile(os.path.join(b["folder"], ".longshot_romfs"))]
+    return [b["folder"] for b in builds if isinstance(b, dict) and b.get("folder") and is_game(b["folder"])]
+
+
+def locate_longshot(folder):
+    """``(data folder, game folders)`` for whatever the user typed: the install folder, ``launcher``, the data folder,
+    ``LongshotLauncher.exe`` or a game folder. Looks in the usual places, then up to three levels down."""
+    folder = os.path.abspath(folder)
+    if os.path.isfile(folder):
+        folder = os.path.dirname(folder)
+    if not os.path.isdir(folder):
+        return None
+    candidates = [folder] + [os.path.join(folder, *p) for p in (("LongshotLauncher-data",), ("launcher",),
+                                                                  ("launcher", "LongshotLauncher-data"))]
+    for root, dirs, _files in os.walk(folder):
+        if root[len(folder):].count(os.sep) >= 3:
+            dirs[:] = []
+        dirs[:] = [d for d in dirs if d not in ("romfs", LONGSHOT_BACKUP)]
+        candidates += [os.path.join(root, d) for d in dirs]
+    candidates = sorted(dict.fromkeys(candidates), key=lambda c: not os.path.isfile(os.path.join(c, "builds.json")))
+    for candidate in candidates:
+        builds = longshot_builds(candidate)
+        if builds:
+            return candidate, builds
+    return None
 
 
 def find_longshot(store):
-    """``{data folder: [game folders]}``; asks for the folder when none is found (Enter skips)."""
+    """``{data folder: [game folders]}``. A Longshot player is asked only where Longshot is, until the folder fits
+    (an empty answer gives up)."""
     found = {d: longshot_builds(d) for d in longshot_data_dirs(store)}
     found = {d: b for d, b in found.items() if b}
     if found:
         return found
     if not ask_yes("Ви граєте в Longshot (гра для Windows)?"):
         return {}
-    folder = input("Вкажіть теку Longshot Launcher (там, де LongshotLauncher.exe): ").strip().strip('"')
-    for data_dir in (os.path.join(folder, "LongshotLauncher-data"), folder):
-        builds = longshot_builds(data_dir)
-        if builds:
-            store.set("_longshot", list(dict.fromkeys((store.get("_longshot") or []) + [data_dir])))
-            return {data_dir: builds}
-    print("У цій теці немає зібраної гри Longshot. Спершу зберіть гру в Longshot Launcher, тоді запустіть патчер.")
-    return {}
+    print("Переклад піде прямо в гру, яку Longshot вже зібрав; пакет .nup не потрібен.")
+    while True:
+        folder = input("Де знаходиться Longshot? Вкажіть теку (де LongshotLauncher.exe) або Enter, щоб пропустити: ")
+        folder = folder.strip().strip('"')
+        if not folder:
+            return {}
+        located = locate_longshot(folder)
+        if located:
+            store.set("_longshot", list(dict.fromkeys((store.get("_longshot") or []) + [located[0]])))
+            return {located[0]: located[1]}
+        print("У цій теці не знайдено зібраної гри Longshot. Перевірте теку або зберіть гру в Longshot Launcher.")
 
 
 def set_language_ru(game):
@@ -662,7 +693,7 @@ def offer_longshot(files, manifest, store):
     print("Знайдено гру Longshot:")
     for game in games:
         print(f"  {os.path.join(game, 'romfs')}")
-    if not ask_yes("Записати переклад прямо в Longshot (пакет .nup для цього не потрібен)?"):
+    if not ask_yes("Записати переклад прямо в Longshot (пакет .nup для цього не потрібен)?", default=True):
         return []
     install_longshot(files, games, manifest)
     for data_dir in found:   # the launcher writes its own language into language.txt when it starts the game
