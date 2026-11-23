@@ -23,7 +23,7 @@ import tempfile
 import urllib.request
 import zipfile
 
-PATCHER_VERSION = "1.3.3"
+PATCHER_VERSION = "1.3.4"
 
 
 def base_dir():
@@ -661,26 +661,50 @@ def set_language_ru(game):
     write_atomic(path, "\n".join(lines) + "\n")
 
 
+def find_elsewhere(game, names, limit=6):
+    """Where else under the game folder (not romfs, not the caches) files with these names lie."""
+    wanted, found = set(names), {}
+    for root, dirs, filenames in os.walk(game):
+        dirs[:] = [d for d in dirs if d not in ("cache", LONGSHOT_BACKUP, "logs", "romfs")]
+        for name in filenames:
+            if name in wanted and len(found) < limit:
+                found.setdefault(name, []).append(os.path.join(root, name))
+    return found
+
+
 def install_longshot(files, games, manifest):
-    """Copy the translated files into each game's romfs; the first time, keep the originals in a backup folder."""
+    """Copy the translated files over the game's romfs files, no checks. The first time, the original (not an earlier
+    translation) goes to a backup folder. Prints and saves what was found: the hash of every file before and after."""
     originals = manifest.get("originals", {})
     for game in games:
         romfs, backup = os.path.join(game, "romfs"), os.path.join(game, LONGSHOT_BACKUP)
-        checked, changed = False, False
+        lines, changed, stats = [], False, {"оригінал": 0, "уже наш переклад": 0, "інший файл": 0, "не було": 0}
+        odd = []
         for rel, path in files.items():
             if not rel.startswith("romfs/"):
                 continue
             inner = rel[len("romfs/"):].split("/")
             target, saved = os.path.join(romfs, *inner), os.path.join(backup, *inner)
-            if os.path.isfile(target) and not os.path.exists(saved):
-                original = rel not in originals or sha256_file(target) == originals[rel]
-                if not original and not checked:
-                    mismatch(f"файл {rel} у грі Longshot не збігається з оригіналом (можливо, там уже інший переклад).")
-                    checked = True
-                if original:   # an earlier translation is never saved as the "original"
-                    os.makedirs(os.path.dirname(saved), exist_ok=True)
-                    shutil.copyfile(target, saved)
+            ours = sha256_file(path)
+            before = sha256_file(target) if os.path.isfile(target) else None
+            if before is None:
+                kind = "не було"
+            elif before == ours:
+                kind = "уже наш переклад"
+            elif rel in originals and before != originals[rel]:
+                kind = "інший файл"
+            else:
+                kind = "оригінал"
+            stats[kind] += 1
+            if kind == "інший файл":
+                odd.append(inner[-1])
+            if kind == "оригінал" and not os.path.exists(saved):
+                os.makedirs(os.path.dirname(saved), exist_ok=True)
+                shutil.copyfile(target, saved)
             changed = copy_if_changed(path, target) or changed
+            after = sha256_file(target)
+            lines.append(f"{rel}: {kind}; було {before or '-'}; наш {ours}; стало {after}"
+                         + ("" if after == ours else "  !!! НЕ ЗАПИСАНО"))
         set_language_ru(game)
         if changed:   # Longshot keeps the UI layout, textures and fonts it resolved from romfs here; it must resolve them again
             stale = os.path.join(game, "cache", "prompts")
@@ -689,6 +713,15 @@ def install_longshot(files, games, manifest):
                 print(f"  кеш інтерфейсу Longshot очищено ({stale}); він відновиться при першому запуску гри")
         print(f"Longshot: переклад записано в {romfs}")
         print(f"  мова гри: ru (українська стоїть на місці російської); оригінали файлів: {backup}")
+        print("  Файли перекладу в грі: " + ", ".join(f"{k} - {v}" for k, v in stats.items() if v))
+        if any("НЕ ЗАПИСАНО" in line for line in lines):
+            print("  !!! Деякі файли не записались (див. звіт).")
+        elsewhere = find_elsewhere(game, set(odd) | {os.path.basename(r) for r in files if stats["не було"] and r.startswith("romfs/")})
+        for name, places in elsewhere.items():
+            lines.append(f"Файл {name} є ще й тут: " + "; ".join(places))
+        report = os.path.join(game, "ua_patch_report.txt")
+        write_atomic(report, f"Патчер {PATCHER_VERSION}\nromfs: {romfs}\n" + "\n".join(lines) + "\n")
+        print(f"  Звіт із хеш-сумами кожного файлу: {report}")
 
 
 def offer_longshot(files, manifest, store):
