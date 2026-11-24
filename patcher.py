@@ -20,10 +20,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import zipfile
 
-PATCHER_VERSION = "1.3.6"
+PATCHER_VERSION = "1.3.7"
 
 
 def base_dir():
@@ -669,13 +670,122 @@ def list_files(root):
     return found
 
 
-def install_longshot(files, games, manifest, reference=None):
+def file_lines(folder):
+    """``  name  size  time  sha256`` for every file under ``folder`` (or why there are none)."""
+    if not os.path.isdir(folder):
+        return [f"  (теки немає: {folder})"]
+    lines = []
+    for rel in sorted(list_files(folder)):
+        path = os.path.join(folder, *rel.split("/"))
+        try:
+            st = os.stat(path)
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime))
+            lines.append(f"  {rel}  {st.st_size}  {stamp}  {sha256_file(path)}")
+        except OSError as error:
+            lines.append(f"  {rel}  помилка: {error}")
+    return lines or ["  (тека порожня)"]
+
+
+def read_tail(path, limit=8 << 20):
+    """The last ``limit`` bytes of a file (a log can be large), or None."""
+    try:
+        with open(path, "rb") as stream:
+            stream.seek(max(0, os.path.getsize(path) - limit))
+            return stream.read()
+    except OSError:
+        return None
+
+
+GAME_FILES = ("language.txt", "longshot_version.txt", "longshot_options.ini", "longshot_crash.ini", ".longshot_romfs",
+              ".longshot_romfs_checked", ".longshot_installed.json", os.path.join("prompts", ".prompt_key"))
+
+
+def collect_game_files(game, zipped):
+    """Longshot's own settings, marks and logs of one build, read into ``zipped`` (zip name -> bytes)."""
+    for name in GAME_FILES:
+        data = read_tail(os.path.join(game, name))
+        if data is not None:
+            zipped["game/" + name.replace(os.sep, "/")] = data
+    for path in glob.glob(os.path.join(game, "logs", "*")):
+        data = read_tail(path)
+        if data is not None:
+            zipped["game/logs/" + os.path.basename(path)] = data
+
+
+def collect_launcher_files(data_dir, zipped):
+    """The launcher's settings, build list and logs, read into ``zipped``."""
+    for name in ("settings.json", "builds.json"):
+        data = read_tail(os.path.join(data_dir, name))
+        if data is not None:
+            zipped["launcher/" + name] = data
+    for path in glob.glob(os.path.join(data_dir, "logs", "*")) + glob.glob(os.path.join(data_dir, "*.log")):
+        data = read_tail(path)
+        if data is not None:
+            zipped["launcher/logs/" + os.path.basename(path)] = data
+
+
+def look_for_missing(game, romfs, missing):
+    """Report lines for translation files the game's romfs does not have: the same names anywhere in the build folder
+    (any letter case), and what the nearest existing folder holds instead."""
+    lines = [f"Файлів перекладу немає в romfs гри: {len(missing)}"] + ["  " + r for r in missing]
+    wanted = {r.rsplit("/", 1)[-1].lower() for r in missing}
+    lines.append("Пошук цих імен у всій теці гри (без урахування регістру):")
+    hits = 0
+    for base, dirs, names in os.walk(game):
+        dirs[:] = [d for d in dirs if d != LONGSHOT_BACKUP]
+        for name in names:
+            if name.lower() in wanted:
+                lines.append("  знайдено: " + os.path.join(base, name))
+                hits += 1
+    if not hits:
+        lines.append("  не знайдено ніде")
+    shown = set()
+    for rel in missing:
+        parts = rel.split("/")[:-1]
+        while parts and not os.path.isdir(os.path.join(romfs, *parts)):
+            parts.pop()
+        folder = os.path.join(romfs, *parts)
+        if folder in shown:
+            continue
+        shown.add(folder)
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError as error:
+            lines.append(f"Вміст {folder}: помилка {error}")
+            continue
+        lines.append(f"Вміст {folder} ({len(names)}):")
+        lines += ["  " + n for n in names[:500]]
+    return lines
+
+
+def write_diag(game, report, zipped):
+    """``ua_patch_diag.zip`` next to the patcher (the report, the texts lists, Longshot's files and logs); its path."""
+    zipped["ua_patch_report.txt"] = ("\n".join(report) + "\n").encode("utf-8")
+    name = "ua_patch_diag.zip" if not zipped.get("_many") else f"ua_patch_diag_{os.path.basename(game)}.zip"
+    zipped.pop("_many", None)
+    path = os.path.join(BASE, name)
+    temp = path + ".tmp"
+    with zipfile.ZipFile(temp, "w", zipfile.ZIP_DEFLATED) as archive:
+        for entry, data in zipped.items():
+            archive.writestr(entry, data)
+    os.replace(temp, path)
+    return path
+
+
+def install_longshot(files, games, manifest, reference=None, launcher=None):
     """Copy the translated files over the game's romfs files, no checks of what is there. Before: count the files of
     the game's romfs against our reference list (our own Longshot romfs). After: check the hash of every copied file."""
     for game in games:
         romfs, backup = os.path.join(game, "romfs"), os.path.join(game, LONGSHOT_BACKUP)
         mine = {rel[len("romfs/"):]: path for rel, path in files.items() if rel.startswith("romfs/")}
-        report = [f"Патчер {PATCHER_VERSION}", f"romfs: {romfs}"]
+        report = [f"Патчер {PATCHER_VERSION}", f"Час: {time.strftime('%Y-%m-%d %H:%M:%S')}", f"Тека гри: {game}",
+                  f"romfs: {romfs}", f"Тека Longshot Launcher: {(launcher or {}).get(game, '?')}"]
+        zipped = {"_many": len(games) > 1}
+        collect_game_files(game, zipped)   # before anything changes (prompts/.prompt_key goes with the cache)
+        if launcher and launcher.get(game):
+            collect_launcher_files(launcher[game], zipped)
+        texts = os.path.join(game, "texts")
+        report += ["Тека texts ДО патчу (ім'я, розмір, час, sha256):"] + file_lines(texts)
         print("  Рахую файли гри (це може тривати хвилину)...")
         there = list_files(romfs)
         have = sorted(r for r in mine if r in there)
@@ -694,6 +804,14 @@ def install_longshot(files, games, manifest, reference=None):
                     print("    немає в грі: " + r)
                 for r in extra[:5]:
                     print("    зайвий файл: " + r)
+        if len(have) < len(mine):
+            lost = sorted(r for r in mine if r not in there)
+            report += look_for_missing(game, romfs, lost)
+            print(f"  !!! У грі немає {len(lost)} з {len(mine)} файлів, які має замінити переклад. Шукаю, що є (деталі у звіті).")
+        report.append("Файли гри ДО запису перекладу (sha256 того, що було на місці):")
+        for rel in sorted(mine):
+            target = os.path.join(romfs, *rel.split("/"))
+            report.append(f"  {sha256_file(target) if os.path.isfile(target) else 'немає файлу'}  {rel}")
         changed = False
         for rel, path in mine.items():
             inner = rel.split("/")
@@ -711,7 +829,10 @@ def install_longshot(files, games, manifest, reference=None):
                 if os.path.isfile(stale):
                     os.remove(stale)
                     print(f"  стару копію тексту Longshot видалено: {stale}")
-                    report.append(f"Видалено стару копію тексту Longshot: {stale}")
+                    report.append(f"Видалено стару копію тексту Longshot: {stale}"
+                                  + (" (ще є!)" if os.path.exists(stale) else " (перевірено: файлу більше немає)"))
+                else:
+                    report.append(f"Старої копії тексту Longshot немає: {stale}")
         bad = [rel for rel, path in mine.items() if not os.path.isfile(os.path.join(romfs, *rel.split("/")))
                or sha256_file(os.path.join(romfs, *rel.split("/"))) != sha256_file(path)]
         report.append(f"Перевірка після копіювання: хеш збігається у {len(mine) - len(bad)} з {len(mine)} файлів")
@@ -730,9 +851,17 @@ def install_longshot(files, games, manifest, reference=None):
                 print("    " + rel)
         else:
             print(f"  Перевірено після копіювання: хеш збігається у всіх {len(mine)} файлів перекладу.")
+        report += ["Тека texts ПІСЛЯ патчу:"] + file_lines(texts)
+        report.append(f"language.txt після патчу: {(read_tail(os.path.join(game, 'language.txt')) or b'-').decode('utf-8', 'replace').strip()}")
         path = os.path.join(game, "ua_patch_report.txt")
         write_atomic(path, "\n".join(report) + "\n")
         print(f"  Звіт: {path}")
+        try:
+            diag = write_diag(game, report, zipped)
+            print(f"  Діагностика для нас: {diag}")
+            print("  Якщо гра все одно не українською, надішліть нам цей файл ua_patch_diag.zip.")
+        except OSError as error:
+            print(f"  Не вдалося записати діагностику: {error}")
 
 
 def offer_longshot(files, manifest, store, reference=None):
@@ -746,7 +875,7 @@ def offer_longshot(files, manifest, store, reference=None):
         print(f"  {os.path.join(game, 'romfs')}")
     if not ask_yes("Записати переклад прямо в Longshot (пакет .nup для цього не потрібен)?", default=True):
         return []
-    install_longshot(files, games, manifest, reference)
+    install_longshot(files, games, manifest, reference, {g: d for d, builds in found.items() for g in builds})
     for data_dir in found:   # the launcher writes its own language into language.txt when it starts the game
         path = os.path.join(data_dir, "settings.json")
         try:
