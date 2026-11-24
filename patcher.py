@@ -24,7 +24,7 @@ import time
 import urllib.request
 import zipfile
 
-PATCHER_VERSION = "1.3.8"   # the patcher (this code); a frozen .exe downloads a newer one from GitHub at every start
+PATCHER_VERSION = "1.3.9"   # the patcher (this code); a frozen .exe downloads a newer one from GitHub at every start
 PROGRAM_VERSION = "2.0"     # the .exe program around it; changes only when the .exe is rebuilt
 
 
@@ -813,14 +813,13 @@ def install_longshot(files, games, manifest, reference=None, launcher=None):
         for rel in sorted(mine):
             target = os.path.join(romfs, *rel.split("/"))
             report.append(f"  {sha256_file(target) if os.path.isfile(target) else 'немає файлу'}  {rel}")
-        changed = False
         for rel, path in mine.items():
             inner = rel.split("/")
             target, saved = os.path.join(romfs, *inner), os.path.join(backup, *inner)
             if os.path.isfile(target) and not os.path.exists(saved):
                 os.makedirs(os.path.dirname(saved), exist_ok=True)
                 shutil.copyfile(target, saved)
-            changed = copy_if_changed(path, target) or changed
+            copy_if_changed(path, target)
         set_language_ru(game)
         # Longshot 3.x keeps its own copy of every language's messages in <build>/texts (lower-case names) and the game
         # reads that copy, not romfs/Mals. A copy made from the original Russian file hides the translation: remove it.
@@ -839,11 +838,14 @@ def install_longshot(files, games, manifest, reference=None, launcher=None):
         report.append(f"Перевірка після копіювання: хеш збігається у {len(mine) - len(bad)} з {len(mine)} файлів")
         for rel in sorted(mine):
             report.append(f"  {'НЕ ЗБІГАЄТЬСЯ' if rel in bad else 'ок'}  {rel}  {sha256_file(mine[rel])}")
-        if changed:   # Longshot keeps the UI layout, textures and fonts it resolved from romfs here; it must resolve them again
-            for folder in (os.path.join(game, "cache", "prompts"), os.path.join(game, "prompts")):
-                if os.path.isdir(folder):
-                    shutil.rmtree(folder, ignore_errors=True)
-                    print(f"  кеш інтерфейсу Longshot очищено ({folder}); він відновиться при першому запуску гри")
+        # Longshot keeps its own copy of the UI layout and textures (prompts/Common.bntx: part of the logo) and the fonts,
+        # made from romfs when the game was built. A copy made before the translation hides it, even when this run copied
+        # nothing new, so it goes every time; Longshot makes it again from romfs at the next start.
+        for folder in (os.path.join(game, "cache", "prompts"), os.path.join(game, "prompts")):
+            if os.path.isdir(folder):
+                shutil.rmtree(folder, ignore_errors=True)
+                print(f"  кеш інтерфейсу Longshot очищено ({folder}); він відновиться при першому запуску гри")
+                report.append(f"Кеш інтерфейсу Longshot очищено: {folder}" + (" (ще є!)" if os.path.exists(folder) else ""))
         print(f"Longshot: переклад записано в {romfs}")
         print(f"  мова гри: ru (українська стоїть на місці російської); оригінали файлів: {backup}")
         if bad:
