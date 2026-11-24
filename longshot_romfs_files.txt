@@ -177410,10 +177410,8 @@ UI/CustomTex/Map/Field/ZoraRiver_Child_00.bntx.zs
 UI/Layout2Archive/Boot.Product.100.Nin_Ounce_NVN2.blarc.zs
 UI/Layout2Archive/Common.Product.100.Nin_Ounce_NVN2.blarc.zs
 UI/Layout2Archive/Common.Product.100.Nin_Ounce_NVN2.bntx.zs
-UI/Layout2Archive/Common.Product.100.Nin_Ounce_NVN2.bntx.zs.before_logofix_2026-11-17.bak
 UI/Layout2Archive/Title.Product.100.Nin_Ounce_NVN2.blarc.zs
 UI/Layout2Archive/Title.Product.100.Nin_Ounce_NVN2.bntx.zs
-UI/Layout2Archive/Title.Product.100.Nin_Ounce_NVN2.bntx.zs.before_logofix_2026-11-17.bak
 UI/Layout2Archive/ZeldaNotes.Product.100.Nin_Ounce_NVN2.blarc.zs
 UI/Layout2Archive/ZeldaNotes.Product.100.Nin_Ounce_NVN2.bntx.zs
 UI/LayoutArchiveCategory.Product.100.byml.zs

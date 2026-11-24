@@ -23,7 +23,7 @@ import tempfile
 import urllib.request
 import zipfile
 
-PATCHER_VERSION = "1.3.5"
+PATCHER_VERSION = "1.3.6"
 
 
 def base_dir():
@@ -703,6 +703,15 @@ def install_longshot(files, games, manifest, reference=None):
                 shutil.copyfile(target, saved)
             changed = copy_if_changed(path, target) or changed
         set_language_ru(game)
+        # Longshot 3.x keeps its own copy of every language's messages in <build>/texts (lower-case names) and the game
+        # reads that copy, not romfs/Mals. A copy made from the original Russian file hides the translation: remove it.
+        for rel in mine:
+            if rel.startswith("Mals/"):
+                stale = os.path.join(game, "texts", rel[len("Mals/"):].lower())
+                if os.path.isfile(stale):
+                    os.remove(stale)
+                    print(f"  стару копію тексту Longshot видалено: {stale}")
+                    report.append(f"Видалено стару копію тексту Longshot: {stale}")
         bad = [rel for rel, path in mine.items() if not os.path.isfile(os.path.join(romfs, *rel.split("/")))
                or sha256_file(os.path.join(romfs, *rel.split("/"))) != sha256_file(path)]
         report.append(f"Перевірка після копіювання: хеш збігається у {len(mine) - len(bad)} з {len(mine)} файлів")
