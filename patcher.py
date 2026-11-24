@@ -24,7 +24,8 @@ import time
 import urllib.request
 import zipfile
 
-PATCHER_VERSION = "1.3.7"
+PATCHER_VERSION = "1.3.8"   # the patcher (this code); a frozen .exe downloads a newer one from GitHub at every start
+PROGRAM_VERSION = "2.0"     # the .exe program around it; changes only when the .exe is rebuilt
 
 
 def base_dir():
@@ -938,7 +939,7 @@ def check_self_update(config):
     except SyntaxError:
         print("Новий патчер у репозиторії пошкоджений; використовую поточний.")
         return None
-    print(f"Знайдено новішу версію патчера: {found.group(1)} (у вас {PATCHER_VERSION}). Оновлюю...")
+    print(f"На GitHub є новіша версія патчера: {found.group(1)}. Завантажую...")
     if getattr(sys, "frozen", False):
         target = os.path.join(CORE_DIR, "patcher.py")
     else:
@@ -1000,7 +1001,7 @@ def check_exe_update(config, argv):
     if sha256_file(exe) == remote_sha:
         return False
     new = exe + ".new"
-    print(f"Знайдено новіший патчер .exe: {info.get('version', '?')} (у вас {PATCHER_VERSION}). Завантажую...")
+    print(f"На GitHub є нова версія програми: {info.get('version', '?')} (у вас {PROGRAM_VERSION}). Завантажую...")
     try:
         request = urllib.request.Request(config["exe_url"], headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0)"})
         with urllib.request.urlopen(request, timeout=120) as response, open(new, "wb") as out:
@@ -1056,11 +1057,11 @@ def main(argv):
     clean = "--clean" in argv
     remove_swap_backup()  # first, so a failing start still clears the .bak from an exe swap
     config = json.load(open(os.path.join(BASE, "config.json"), encoding="utf-8"))
-    print("=" * 60)
-    print(f"  {config['title']} — патчер українського перекладу (версія {PATCHER_VERSION})")
-    print("=" * 60 + "\n")
     os.makedirs(INPUT, exist_ok=True)
     if not os.environ.get("UA_CORE_LOADED"):
+        if getattr(sys, "frozen", False):
+            os.environ["UA_PROGRAM_VERSION"] = PROGRAM_VERSION   # the patcher it runs from GitHub shows it too
+            print(f"Програма {PROGRAM_VERSION}: перевіряю, чи є на GitHub новіший патчер...")
         if check_exe_update(config, argv):
             sys.exit(0)
         newer = check_self_update(config)
@@ -1069,6 +1070,11 @@ def main(argv):
         cached = cached_core()
         if cached:
             run_core(cached, argv)
+    program = os.environ.get("UA_PROGRAM_VERSION")
+    print("=" * 60)
+    print(f"  {config['title']} — патчер українського перекладу")
+    print(f"  Версія патчера: {PATCHER_VERSION}" + (f"; версія програми: {program}" if program else ""))
+    print("=" * 60 + "\n")
     store = Store()
     work = tempfile.mkdtemp(prefix="ua_patch_", dir=INPUT)
     try:

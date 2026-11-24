@@ -2,5 +2,7 @@
   "title": "Ocarina of Time (Nintendo Switch 2)",
   "mode": "nup",
   "github_repo": "https://github.com/rashevskyv/ZeldaOoT-Switch2-Ukrainian-translation",
-  "branch": "main"
+  "branch": "main",
+  "exe_url": "https://raw.githubusercontent.com/rashevskyv/ZeldaOoT-Switch2-Ukrainian-translation/main/OoT_Switch2_Patcher.exe",
+  "exe_info_url": "https://raw.githubusercontent.com/rashevskyv/ZeldaOoT-Switch2-Ukrainian-translation/main/patcher_info.json"
 }
