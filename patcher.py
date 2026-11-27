@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -24,7 +25,7 @@ import time
 import urllib.request
 import zipfile
 
-PATCHER_VERSION = "1.4.0"   # the patcher (this code); a frozen .exe downloads a newer one from GitHub at every start
+PATCHER_VERSION = "1.4.1"   # the patcher (this code); a frozen .exe downloads a newer one from GitHub at every start
 PROGRAM_VERSION = "2.0"     # the .exe program around it; changes only when the .exe is rebuilt
 
 
@@ -550,7 +551,7 @@ def patch_nup(manifest, repo, work, ctx):
     files = changed_files(repo)
     if state == "current":
         print(f"Вже актуальна версія перекладу ({ctx['commit'][:7]}): {output}")
-        sync_overlay(files, pc)
+        sync_overlay(files, pc, manifest.get("removed", ()))
         return output
     progress_shown = [-1]
 
@@ -572,15 +573,21 @@ def patch_nup(manifest, repo, work, ctx):
         print(f"Запис пакета {os.path.basename(output)} (це довго: копіюється весь пакет)...")
         nup.write(image, output, changes, progress, lambda: False)
     print()
-    sync_overlay(files, pc)
+    sync_overlay(files, pc, manifest.get("removed", ()))
     remember(output, ctx, facts, manifest)
     return output
 
 
-def sync_overlay(files, pc):
-    """``<name> (UA) PC\\romfs\\...``: the same romfs tree the NX2navi and Hookshot mods read. Only changed files."""
+def sync_overlay(files, pc, removed=()):
+    """``<name> (UA) PC\\romfs\\...``: the same romfs tree the NX2navi and Hookshot mods read. Only changed files;
+    a file an earlier version shipped and this one does not (manifest ``removed``) is deleted, the game's own is read."""
     for rel, path in files.items():
         copy_if_changed(path, os.path.join(pc, *rel.split("/")))
+    for rel in removed:
+        stale = os.path.join(pc, *rel.split("/"))
+        if rel not in files and os.path.isfile(stale):
+            os.remove(stale)
+            print(f"  файл старої версії перекладу видалено: {stale}")
     print(f"Оверлей для ПК: {pc}")
 
 
@@ -812,7 +819,104 @@ def write_diag(game, report, zipped):
     return path
 
 
-def install_longshot(files, games, manifest, reference=None, launcher=None):
+def raise_prompt_sizes(prompts, logo, files):
+    """With ``prompts/`` the game reads the resource size table from ``prompts/rsizetable.zs`` (Longshot Builder's copy
+    of the table romfs had at the build), not from romfs. A file larger than its entry crashes the game (the fonts with
+    the Ukrainian letters), so our raised entries (``longshot/rsizetable.entries.json``) go into that copy too.
+    Returns the report line."""
+    table_path = os.path.join(prompts, "rsizetable.zs")
+    try:
+        with open(os.path.join(logo, "rsizetable.entries.json"), encoding="utf-8") as stream:
+            meta = json.load(stream)
+    except (OSError, ValueError, TypeError):
+        return "Немає даних таблиці розмірів для prompts/rsizetable.zs: не змінено"
+    shipped = files.get(meta["for"])
+    if not shipped or sha256_file(shipped) != meta["for_sha256"]:
+        return "Дані таблиці розмірів не від цієї версії перекладу: prompts/rsizetable.zs не змінено"
+    try:
+        from compression import zstd   # Python 3.14+
+        with open(table_path, "rb") as stream:
+            table = bytearray(zstd.decompress(stream.read()))
+        magic, _version, _name_len, count, _names = struct.unpack_from("<6sIIII", table, 0)
+        if magic != b"RESTBL":
+            raise ValueError("not a RESTBL table")
+        at = {struct.unpack_from("<I", table, 22 + 8 * i)[0]: 26 + 8 * i for i in range(count)}
+        missing = [key for key in meta["entries"] if int(key, 16) not in at]
+        changed = 0
+        for key, size in meta["entries"].items():
+            where = at.get(int(key, 16))
+            if where is not None and struct.unpack_from("<I", table, where)[0] < size:
+                struct.pack_into("<I", table, where, size)
+                changed += 1
+        if changed:
+            write_atomic(table_path, zstd.compress(bytes(table)))
+    except (ImportError, OSError, ValueError, struct.error) as error:
+        print(f"  !!! Таблицю розмірів Longshot не оновлено ({error}): гра може не запуститися. Закрийте гру й\n"
+              "      запустіть патчер ще раз або оновіть (перезберіть) гру в Longshot Launcher.")
+        return f"prompts/rsizetable.zs: не оновлено ({error})"
+    if missing:
+        print("  !!! У таблиці розмірів Longshot немає записів для шрифтів перекладу: оновіть (перезберіть) гру в\n"
+              "      Longshot Launcher, потім запустіть патчер ще раз.")
+    return f"prompts/rsizetable.zs: піднято записів {changed}, уже були такі {len(meta['entries']) - changed - len(missing)}, немає {len(missing)}"
+
+
+def longshot_prompts(game, logo, files):
+    """Longshot's button prompts of other controllers (``prompts/``: made by Longshot Builder from romfs, never by the
+    game) stay. Their ``Common.bntx`` is the game's UI textures and the game shows it in place of romfs's, so the
+    translated logo goes into it as byte runs (``longshot/Common.bntx.runs*``); the game's runtime copies made from it
+    (``cache/prompts``) are cleared. Returns the report lines."""
+    report = []
+    cache = os.path.join(game, "cache", "prompts")
+    if os.path.isdir(cache):
+        shutil.rmtree(cache, ignore_errors=True)
+        report.append(f"Кеш кнопок Longshot очищено (гра зробить його знову): {cache}")
+    prompts = os.path.join(game, "prompts")
+    if not os.path.isdir(prompts):
+        print("  !!! У грі немає теки Longshot prompts (її видаляли патчери 1.3.x), тому гра показує кнопки Switch, а не\n"
+              "      PlayStation чи Xbox. Відкрийте Longshot Launcher і оновіть (перезберіть) гру в ту саму теку: Longshot\n"
+              "      зробить prompts знову з уже перекладених файлів. Після цього можна ще раз запустити патчер.")
+        return report + [f"Теки prompts немає: {prompts}. Потрібне оновлення гри в Longshot Launcher."]
+    report.append(raise_prompt_sizes(prompts, logo, files))
+    target = os.path.join(prompts, "Common.bntx")
+    try:
+        with open(os.path.join(logo or "", "Common.bntx.runs.json"), encoding="utf-8") as stream:
+            meta = json.load(stream)
+        with open(os.path.join(logo, "Common.bntx.runs"), "rb") as stream:
+            blob = stream.read()
+    except (OSError, ValueError, TypeError):
+        return report + ["Немає даних логотипу для prompts/Common.bntx: не змінено"]
+    shipped = files.get(meta["for"])
+    if not shipped or sha256_file(shipped) != meta["for_sha256"]:
+        return report + ["Дані логотипу для prompts/Common.bntx не від цієї версії перекладу: не змінено"]
+    have = sha256_file(target) if os.path.isfile(target) else "немає файлу"
+    if have == meta["to_sha256"]:
+        return report + [f"prompts/Common.bntx уже з перекладеним логотипом: {have}"]
+    if have != meta["from_sha256"]:
+        print("  Логотип: prompts\\Common.bntx у Longshot не оригінальний, його не змінено. Щоб побачити перекладений\n"
+              "  логотип, оновіть (перезберіть) гру в Longshot Launcher.")
+        return report + [f"prompts/Common.bntx не оригінальний ({have}): не змінено"]
+    temporary = target + ".ua_tmp"
+    try:
+        shutil.copyfile(target, temporary)
+        with open(temporary, "r+b") as stream:
+            at = 0
+            for offset, length in meta["runs"]:
+                stream.seek(offset)
+                stream.write(blob[at:at + length])
+                at += length
+        if sha256_file(temporary) != meta["to_sha256"]:
+            raise OSError("хеш після запису не збігається")
+        os.replace(temporary, target)
+    except OSError as error:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+        print(f"  Логотип у prompts\\Common.bntx не записано ({error}). Закрийте гру й запустіть патчер ще раз.")
+        return report + [f"prompts/Common.bntx: не записано ({error})"]
+    print("  Логотип записано в prompts\\Common.bntx Longshot (кнопки PlayStation/Xbox лишаються).")
+    return report + [f"prompts/Common.bntx: записано перекладений логотип, {meta['to_sha256']}"]
+
+
+def install_longshot(files, games, manifest, reference=None, launcher=None, logo=None):
     """Copy the translated files over the game's romfs files, no checks of what is there. Before: count the files of
     the game's romfs against our reference list (our own Longshot romfs). After: check the hash of every copied file."""
     for game in games:
@@ -821,7 +925,7 @@ def install_longshot(files, games, manifest, reference=None, launcher=None):
         report = [f"Патчер {PATCHER_VERSION}", f"Час: {time.strftime('%Y-%m-%d %H:%M:%S')}", f"Тека гри: {game}",
                   f"romfs: {romfs}", f"Тека Longshot Launcher: {(launcher or {}).get(game, '?')}"]
         zipped = {"_many": len(games) > 1}
-        collect_game_files(game, zipped)   # before anything changes (prompts/.prompt_key goes with the cache)
+        collect_game_files(game, zipped)   # before anything changes
         if launcher and launcher.get(game):
             collect_launcher_files(launcher[game], zipped)
         texts = os.path.join(game, "texts")
@@ -859,6 +963,19 @@ def install_longshot(files, games, manifest, reference=None, launcher=None):
                 os.makedirs(os.path.dirname(saved), exist_ok=True)
                 shutil.copyfile(target, saved)
             copy_if_changed(path, target)
+        # A file an earlier version shipped and this one does not (manifest "removed"): the game's original comes back.
+        for rel in manifest.get("removed", ()):
+            inner = rel[len("romfs/"):].split("/")
+            if rel[len("romfs/"):] in mine:
+                continue
+            target, saved = os.path.join(romfs, *inner), os.path.join(backup, *inner)
+            if os.path.isfile(saved):
+                shutil.copyfile(saved, target)
+                os.remove(saved)
+                print(f"  повернуто оригінал гри: {target}")
+                report.append(f"Повернуто оригінал (файла більше немає в перекладі): {rel}  {sha256_file(target)}")
+            elif os.path.isfile(target):
+                report.append(f"Файла {rel} більше немає в перекладі, а оригіналу в {backup} немає: лишився як є")
         set_language_ru(game)
         # Longshot 3.x keeps its own copy of every language's messages in <build>/texts (lower-case names) and the game
         # reads that copy, not romfs/Mals. A copy made from the original Russian file hides the translation: remove it.
@@ -877,14 +994,7 @@ def install_longshot(files, games, manifest, reference=None, launcher=None):
         report.append(f"Перевірка після копіювання: хеш збігається у {len(mine) - len(bad)} з {len(mine)} файлів")
         for rel in sorted(mine):
             report.append(f"  {'НЕ ЗБІГАЄТЬСЯ' if rel in bad else 'ок'}  {rel}  {sha256_file(mine[rel])}")
-        # Longshot keeps its own copy of the UI layout and textures (prompts/Common.bntx: part of the logo) and the fonts,
-        # made from romfs when the game was built. A copy made before the translation hides it, even when this run copied
-        # nothing new, so it goes every time; Longshot makes it again from romfs at the next start.
-        for folder in (os.path.join(game, "cache", "prompts"), os.path.join(game, "prompts")):
-            if os.path.isdir(folder):
-                shutil.rmtree(folder, ignore_errors=True)
-                print(f"  кеш інтерфейсу Longshot очищено ({folder}); він відновиться при першому запуску гри")
-                report.append(f"Кеш інтерфейсу Longshot очищено: {folder}" + (" (ще є!)" if os.path.exists(folder) else ""))
+        report += longshot_prompts(game, logo, files)
         print(f"Longshot: переклад записано в {romfs}")
         print(f"  мова гри: ru (українська стоїть на місці російської); оригінали файлів: {backup}")
         if bad:
@@ -906,7 +1016,7 @@ def install_longshot(files, games, manifest, reference=None, launcher=None):
             print(f"  Не вдалося записати діагностику: {error}")
 
 
-def offer_longshot(files, manifest, store, reference=None):
+def offer_longshot(files, manifest, store, reference=None, logo=None):
     """Install into Longshot when the user agrees; returns the game folders written (empty when skipped)."""
     found = find_longshot(store)
     games = [g for builds in found.values() for g in builds]
@@ -917,7 +1027,7 @@ def offer_longshot(files, manifest, store, reference=None):
         print(f"  {os.path.join(game, 'romfs')}")
     if not ask_yes("Записати переклад прямо в Longshot (пакет .nup для цього не потрібен)?", default=True):
         return []
-    install_longshot(files, games, manifest, reference, {g: d for d, builds in found.items() for g in builds})
+    install_longshot(files, games, manifest, reference, {g: d for d, builds in found.items() for g in builds}, logo)
     for data_dir in found:   # the launcher writes its own language into language.txt when it starts the game
         path = os.path.join(data_dir, "settings.json")
         try:
@@ -1127,7 +1237,8 @@ def main(argv):
         ctx = {"commit": head, "store": store, "clean": clean}
         reference_file = os.path.join(repo, "longshot_romfs_files.txt")
         reference = set(open(reference_file, encoding="utf-8").read().split("\n")) - {""} if os.path.isfile(reference_file) else None
-        longshot = offer_longshot(changed_files(repo), manifest, store, reference) if config["mode"] == "nup" else []
+        longshot = (offer_longshot(changed_files(repo), manifest, store, reference, os.path.join(repo, "longshot"))
+                    if config["mode"] == "nup" else [])
         if longshot and not ask_yes("Зібрати також пакет .nup (для консолі, NX2navi або Hookshot)?"):
             output = ", ".join(os.path.join(game, "romfs") for game in longshot)
         else:

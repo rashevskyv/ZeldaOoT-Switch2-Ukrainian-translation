@@ -1,0 +1,11 @@
+{
+ "for": "romfs/System/Resource/ResourceSizeTable.Product.111.Nin_Ounce_NVN2.rsizetable.zs",
+ "for_sha256": "5d87818649100a3d2ee355347e55429c4637a49338a41c746a9bee844cd42e93",
+ "entries": {
+  "4d2c3ca1": 46824,
+  "6ce8c2e9": 119144,
+  "78efd654": 48936,
+  "b62dd27f": 120520,
+  "f65f5ed3": 124232
+ }
+}

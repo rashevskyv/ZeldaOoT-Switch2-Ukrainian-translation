@@ -5,5 +5,10 @@
   "originals": {
     "romfs/Mals/EUru.Product.110.sarc.zs": "a2c580360d3acab0c91f80ff044aa812dba636af510fa01d363309e7dd3f2a9b"
   },
-  "translation_version": 3
+  "translation_version": 4,
+  "removed": [
+    "romfs/Font2/Scalable/ClarimoUDPE-DemiBold.Nin_Ounce_NVN2.bfotf.zs",
+    "romfs/Font2/Scalable/ClarimoUDPE-Light.Nin_Ounce_NVN2.bfotf.zs",
+    "romfs/Font2/Scalable/ClarimoUDPE-Regular.Nin_Ounce_NVN2.bfotf.zs"
+  ]
 }
